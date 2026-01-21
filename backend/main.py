@@ -103,23 +103,52 @@ async def generate_commander(request: CommanderRequest):
     query_prompt = (
         f"The user wants a commander deck with this description: '{request.prompt}'.\n"
         f"Create a Scryfall search query to find candidates for the deck's commander. "
-        f"The query MUST include 't:legendary'"
-        f"The query MUST include 't:creature'"
-        f"If the request mentions a specific reature type, use 't:[creature_type]'"
-        f"Include color constraints if specified in the description (e.g. 'c>=br' or 'id:g'). "
-        f"Output ONLY the raw query string. Do not output text like 'Here is the Scryfall search query'."
+        f"The query MUST include 't:legendary'.\n"
+        f"The query MUST include 't:creature' or 'o:\"can be your commander\"' (for planeswalkers).\n"
+        f"If the request mentions a specific creature type, use 't:[creature_type]'.\n"
+        f"Include color constraints if specified (e.g. 'id:gw' for Selesnya, 'c>=br' for Rakdos). "
+        f"If no specific colors are mentioned, do NOT add color constraints unless implied by the tribe/theme.\n"
+        f"Output ONLY the raw query string in a JSON format like {{\"query\": \"...\"}}."
     )
-    raw_query = await client.generate(query_prompt)
-    search_query = raw_query.strip().replace("Query:", "").replace("`", "").strip()
+    raw_response = await client.generate(query_prompt)
+    print(f"Raw Query Response: {raw_response}")
 
-    print("\n\n" + search_query + "\n\n")
+    search_query = ""
+    try:
+        import json
+        import re
+        # Attempt to find JSON in the response
+        json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+            search_query = data.get("query", "")
+        else:
+            # Fallback cleanup
+            search_query = raw_response.strip().replace("Query:", "").replace("`", "").strip()
+            if search_query.startswith('"') and search_query.endswith('"'):
+                search_query = search_query[1:-1]
+    except Exception as e:
+        print(f"Error parsing query: {e}")
+        search_query = raw_response.strip()
 
-    # Fallback to general search if prompt is weird
-    if "t:legendary" not in search_query:
-        search_query += " t:legendary (t:creature or o:\"can be your commander\")"
+    # Post-process validation
+    if not search_query:
+        search_query = "t:legendary (t:creature or o:\"can be your commander\")"
+
+    # Balance parentheses
+    open_count = search_query.count('(')
+    close_count = search_query.count(')')
+    if open_count > close_count:
+        search_query += ')' * (open_count - close_count)
+
+    # Ensure legendary requirement if not present
+    if "t:legendary" not in search_query and "legendary" not in search_query:
+        search_query = f"t:legendary {search_query}"
+
+    print(f"Final Search Query: {search_query}")
 
     # Step 2: Search Scryfall
-    candidates = await asyncio.to_thread(search_scryfall, search_query, limit=10)
+    candidates = await asyncio.to_thread(search_scryfall, search_query, limit=20)
 
     # If search fails, fallback to old method (direct prompt) or simple search
     if not candidates:
