@@ -99,7 +99,7 @@ def import_cards(text: str):
 # Deck Generation Endpoints
 @app.post("/api/generate/commander", response_model=CommanderResponse)
 async def generate_commander(request: CommanderRequest):
-    prompt = f"Suggest a Magic: The Gathering Commander based on this request: {request.prompt}. Return ONLY the name of the card in the first line, and a 1-2 sentence reasoning in the second line."
+    prompt = f"You are an advanced Magic: The Gathering commander deckbuilder. Suggest a Magic: The Gathering Commander based on this request: {request.prompt}. Valid commanders are Legendary Creatures or Planeswalkers with the text 'This can be a commander'. Return ONLY the name of the card in the first line, and a 1-2 sentence reasoning in the second line."
     response_text = await client.generate(prompt)
     lines = response_text.strip().split('\n')
     name = lines[0].replace("Commander:", "").strip()
