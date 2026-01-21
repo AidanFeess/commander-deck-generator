@@ -46,14 +46,25 @@ class OllamaClient:
             return await self._mock_response(messages[-1]['content'])
 
     async def _mock_response(self, input_text: str) -> str:
-        await asyncio.sleep(1) # Simulate delay
-        if "commander" in input_text.lower():
-            return "Commander: Atraxa, Praetors' Voice\nReasoning: Because she is powerful and versatile for many strategies."
+        await asyncio.sleep(0.5) # Simulate delay
+
+        # Mock Scryfall Query generation
+        if "Scryfall search query" in input_text:
+             if "Green" in input_text:
+                 # Simulate the bad query the user is complaining about or a mock one
+                 return "Query: t:legendary (t:creature or o:\"can be your commander\") id:g"
+             return "Query: t:legendary (t:creature or o:\"can be your commander\")"
+
+        # Mock Selection
+        if "Select the single best fit" in input_text:
+             return "Commander: Omnath, Locus of Mana\nReasoning: Classic Mono-Green big mana commander."
+
         if "combo" in input_text.lower():
-             return "Combo: Basalt Monolith + Rings of Brighthearth\nResult: Infinite colorless mana.\nInstructions: Tap Basalt Monolith for 3 mana. Pay 3 to untap using Monolith's ability. Copy the untap ability with Rings of Brighthearth (pay 2). Let copy resolve, untap Monolith. Tap for 3 mana. Let original untap resolve. Repeat."
-        if "list" in input_text.lower():
-            # Return a bigger list for deck generation mock
+             return "Combo: Basalt Monolith + Rings of Brighthearth | Result: Infinite colorless mana. | Instructions: Tap Basalt Monolith for 3 mana. Pay 3 to untap using Monolith's ability. Copy the untap ability with Rings of Brighthearth (pay 2). Let copy resolve, untap Monolith. Tap for 3 mana. Let original untap resolve. Repeat."
+
+        if "list" in input_text.lower() or "extract" in input_text.lower():
             return "Sol Ring, Arcane Signet, Command Tower, Cultivate, Kodama's Reach, Swords to Plowshares, Path to Exile, Beast Within, Generous Gift, Cyclonic Rift, Rhystic Study, Smothering Tithe, Teferi's Protection, Heroic Intervention, Counterspell, Negate, Fierce Guardianship, Mana Drain, Lightning Greaves, Swiftfoot Boots"
+
         return f"This is a mock response from the AI for input: {input_text[:50]}..."
 
 client = OllamaClient()

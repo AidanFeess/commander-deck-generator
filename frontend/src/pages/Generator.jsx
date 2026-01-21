@@ -58,12 +58,12 @@ export default function Generator() {
 
       <div className="bg-gray-800 p-8 rounded-xl shadow-2xl border border-gray-700">
         <div className="space-y-4">
-          <label className="block text-lg font-medium">Describe your desired commander</label>
+          <label className="block text-lg font-medium">Describe how you want your deck to play...</label>
           <div className="flex gap-4">
             <input
               type="text"
               className="flex-1 p-4 bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition"
-              placeholder="e.g. A dragon that cares about treasure..."
+              placeholder="e.g. A fast goblin deck that overwhelms opponents, or a control deck that uses artifacts."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
             />
@@ -78,11 +78,23 @@ export default function Generator() {
         </div>
 
         {commander && (
-          <div className="mt-8 animate-fade-in flex flex-col md:flex-row gap-8 items-center bg-gray-750 p-6 rounded-lg border border-gray-700">
-            <img src={commander.image_uri} alt={commander.name} className="w-64 rounded-lg shadow-2xl" />
-            <div className="flex-1 space-y-4">
-              <h2 className="text-2xl font-bold text-white">{commander.name}</h2>
-              <p className="text-gray-300 italic">"{commander.reasoning}"</p>
+          <div className="mt-8 animate-fade-in flex flex-col gap-8 bg-gray-750 p-6 rounded-lg border border-gray-700">
+            <div className="flex flex-col md:flex-row gap-6 justify-center items-center">
+                {commander.commanders && commander.commanders.length > 0 ? (
+                    commander.commanders.map((cmd, idx) => (
+                        <div key={idx} className="flex flex-col items-center">
+                            <img src={cmd.image_uri || commander.image_uri} alt={cmd.name} className="w-64 rounded-lg shadow-2xl transition hover:scale-105" />
+                            {commander.commanders.length > 1 && <span className="mt-2 text-sm font-semibold">{cmd.name}</span>}
+                        </div>
+                    ))
+                ) : (
+                    <img src={commander.image_uri} alt={commander.name} className="w-64 rounded-lg shadow-2xl" />
+                )}
+            </div>
+
+            <div className="flex-1 space-y-4 text-center md:text-left">
+              <h2 className="text-2xl font-bold text-white text-center">{commander.name}</h2>
+              <p className="text-gray-300 italic text-center">"{commander.reasoning}"</p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 pt-6 border-t border-gray-700">
                 <div>

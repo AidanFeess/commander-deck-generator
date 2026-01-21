@@ -43,9 +43,10 @@ export default function Process() {
     return () => ws.close();
   }, [id, navigate]);
 
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
+  // Auto-scroll removed as per user request
+  // useEffect(() => {
+  //   logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  // }, [logs]);
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
