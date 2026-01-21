@@ -16,3 +16,11 @@ INFO:     Finished server process [10914]
 INFO:     Started server process [12241]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
+WARNING:  StatReload detected changes in 'ollama_client.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [12241]
+INFO:     Started server process [13705]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.

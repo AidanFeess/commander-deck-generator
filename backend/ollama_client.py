@@ -2,18 +2,25 @@ import ollama
 import asyncio
 import random
 import time
+import os
 
 class OllamaClient:
     def __init__(self, model="llama3"):
         self.model = model
         self.mock_mode = False
         self.async_client = None
+
+        # Check for OLLAMA_HOST env var
+        host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
         try:
             # Check connection (sync check on init is fine)
-            ollama.list()
-            self.async_client = ollama.AsyncClient()
-        except Exception:
-            print("Ollama not reachable, switching to MOCK mode.")
+            # Create a client with the specific host if needed
+            self.client = ollama.Client(host=host)
+            self.client.list()
+            self.async_client = ollama.AsyncClient(host=host)
+        except Exception as e:
+            print(f"Ollama not reachable at {host}: {e}, switching to MOCK mode.")
             self.mock_mode = True
 
     async def generate(self, prompt: str, system: str = "") -> str:
