@@ -42,6 +42,33 @@ export default function Results() {
     fetchDeck();
   }, [id]);
 
+  // Fetch commander details to display image
+  const [commanderData, setCommanderData] = useState([]);
+
+  useEffect(() => {
+    if (deck) {
+        const fetchCommander = async () => {
+            // Split partner commanders
+            const names = deck.commander.split('+').map(n => n.trim());
+            const data = [];
+            for (const name of names) {
+                 try {
+                     const res = await axios.get(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`);
+                     let img = "";
+                     if (res.data.image_uris) img = res.data.image_uris.normal;
+                     else if (res.data.card_faces) img = res.data.card_faces[0].image_uris.normal;
+
+                     data.push({ name: res.data.name, image_uri: img });
+                 } catch (e) {
+                     data.push({ name: name, image_uri: "" });
+                 }
+            }
+            setCommanderData(data);
+        };
+        fetchCommander();
+    }
+  }, [deck]);
+
   if (!deck) return <div>Loading...</div>;
 
   // Categorize cards
@@ -86,13 +113,23 @@ export default function Results() {
 
   return (
     <div className="space-y-8 relative">
-      <div className="flex justify-between items-center bg-gray-800 p-6 rounded-lg shadow-lg">
-        <div>
-          <h1 className="text-3xl font-bold">{deck.commander}</h1>
-          <p className="text-gray-400">Generated on {new Date(deck.created_at).toLocaleDateString()}</p>
+      <div className="flex flex-col md:flex-row gap-6 bg-gray-800 p-6 rounded-lg shadow-lg">
+
+        {/* Commander Display */}
+        <div className="flex gap-4 justify-center md:justify-start">
+             {commanderData.map((cmd, i) => (
+                 <img key={i} src={cmd.image_uri} alt={cmd.name} className="w-48 rounded-lg shadow-xl hover:scale-105 transition" />
+             ))}
         </div>
-        <div className="space-x-4">
-          <button onClick={() => setShowCombos(true)} className="bg-yellow-600 hover:bg-yellow-700 px-4 py-2 rounded font-bold shadow">
+
+        <div className="flex-1 flex flex-col justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">{deck.commander}</h1>
+            <p className="text-gray-400">Generated on {new Date(deck.created_at).toLocaleDateString()}</p>
+          </div>
+
+          <div className="flex flex-wrap gap-4 mt-6">
+             <button onClick={() => setShowCombos(true)} className="bg-yellow-600 hover:bg-yellow-700 px-4 py-2 rounded font-bold shadow">
             Combo List ({deck.combos.length})
           </button>
           <button onClick={copyDeck} className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-bold shadow">
@@ -102,6 +139,7 @@ export default function Results() {
             Download Deck
           </button>
         </div>
+      </div>
       </div>
 
       <div className="space-y-8">
