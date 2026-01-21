@@ -19,10 +19,15 @@ class InventoryItem(Card):
 class CommanderRequest(BaseModel):
     prompt: str
 
+class CommanderDetails(BaseModel):
+    name: str
+    image_uri: Optional[str] = None
+
 class CommanderResponse(BaseModel):
     name: str
     reasoning: str
     image_uri: Optional[str] = None
+    commanders: List[CommanderDetails] = []
 
 class DeckSettings(BaseModel):
     commander_name: str

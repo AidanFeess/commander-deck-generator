@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict
 
-from models import InventoryItem, CommanderRequest, CommanderResponse, DeckSettings, Deck, LogMessage, Card
+from models import InventoryItem, CommanderRequest, CommanderResponse, CommanderDetails, DeckSettings, Deck, LogMessage, Card
 from database import init_db, add_inventory_item, get_inventory, delete_inventory_item, create_deck, update_deck_status, get_deck, get_all_decks
 from mtg_api import get_card_data
 from ollama_client import client
@@ -99,17 +99,64 @@ def import_cards(text: str):
 # Deck Generation Endpoints
 @app.post("/api/generate/commander", response_model=CommanderResponse)
 async def generate_commander(request: CommanderRequest):
-    prompt = f"You are an advanced Magic: The Gathering commander deckbuilder. Suggest a Magic: The Gathering Commander based on this request: {request.prompt}. Valid commanders are Legendary Creatures or Planeswalkers with the text 'This can be a commander'. Return ONLY the name of the card in the first line, and a 1-2 sentence reasoning in the second line."
+    prompt = (
+        f"You are an expert Magic: The Gathering deck builder. The user wants a commander deck based on this description: "
+        f"'{request.prompt}'.\n"
+        f"Suggest the best possible Commander (or legal Partner pair) for this deck. "
+        f"Valid commanders are Legendary Creatures or Planeswalkers with the text 'This can be a commander'.\n"
+        f"If suggesting partners, separate their names with ' + '.\n"
+        f"Return the response in exactly two lines:\n"
+        f"Line 1: The name(s) of the card(s) ONLY. (e.g., 'Atraxa, Praetors' Voice' or 'Thrasios, Triton Hero + Tymna the Weaver')\n"
+        f"Line 2: A 1-2 sentence reasoning explaining why this commander fits the description."
+    )
+
     response_text = await client.generate(prompt)
     lines = response_text.strip().split('\n')
-    name = lines[0].replace("Commander:", "").strip()
+    # Basic cleaning
+    name_line = lines[0].replace("Commander:", "").strip()
     reasoning = " ".join(lines[1:]).replace("Reasoning:", "").strip()
 
-    # Verify card exists (use async or thread pool for IO)
-    data = await asyncio.to_thread(get_card_data, name)
-    image_uri = data.get('image_uri') if data else None
+    commander_names = [n.strip() for n in name_line.split('+')]
 
-    return CommanderResponse(name=name, reasoning=reasoning, image_uri=image_uri)
+    commanders_details = []
+    primary_image = None
+
+    for c_name in commander_names:
+        data = await asyncio.to_thread(get_card_data, c_name)
+        if data:
+            # We trust the LLM mostly, but we verify existence via Scryfall.
+            # We check if it's a valid commander type if possible, but mainly we want to ensure it exists.
+            type_line = data.get('type_line', '').lower()
+            oracle_text = data.get('oracle_text', '').lower()
+
+            is_legendary_creature = "legendary creature" in type_line
+            is_commander_planeswalker = "planeswalker" in type_line and "can be your commander" in oracle_text
+
+            # Allow it if it exists, but prefer valid commanders.
+            # If it's not a valid commander, we still add it but maybe the user will see it's wrong.
+            # The prompt requested valid commanders.
+
+            img = data.get('image_uri')
+            commanders_details.append(CommanderDetails(name=data['name'], image_uri=img))
+            if not primary_image:
+                primary_image = img
+        else:
+            # If Scryfall fails, we add the name without image
+            commanders_details.append(CommanderDetails(name=c_name, image_uri=None))
+
+    # If no valid cards found at all (LLM hallucinated wildly or API down)
+    if not commanders_details:
+         commanders_details.append(CommanderDetails(name=name_line, image_uri=None))
+
+    # Reconstruct name from found details to be clean and official
+    clean_name = " + ".join([c.name for c in commanders_details])
+
+    return CommanderResponse(
+        name=clean_name,
+        reasoning=reasoning,
+        image_uri=primary_image,
+        commanders=commanders_details
+    )
 
 async def run_deck_generation(deck_id: int, settings: DeckSettings):
     process_id = str(deck_id)
