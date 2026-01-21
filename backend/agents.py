@@ -9,7 +9,7 @@ from database import get_inventory
 # Personalities
 PERSONALITIES = [
     "Aggressive", "Control-freak", "Combo-lover", "Budget-conscious",
-    "Flavor-obsessed", "Chaos-bringer"
+    "Flavor-obsessed", "Chaos-bringer", "Normal"
 ]
 
 class Agent:

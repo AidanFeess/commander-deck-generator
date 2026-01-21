@@ -102,13 +102,17 @@ async def generate_commander(request: CommanderRequest):
     # Step 1: Formulate a Search Query
     query_prompt = (
         f"The user wants a commander deck with this description: '{request.prompt}'.\n"
-        f"Create a Scryfall search query to find candidates. "
-        f"The query MUST include 't:legendary' and ('t:creature' or 'o:can be your commander'). "
+        f"Create a Scryfall search query to find candidates for the deck's commander. "
+        f"The query MUST include 't:legendary'"
+        f"The query MUST include 't:creature'"
+        f"If the request mentions a specific reature type, use 't:[creature_type]'"
         f"Include color constraints if specified in the description (e.g. 'c>=br' or 'id:g'). "
-        f"Output ONLY the raw query string."
+        f"Output ONLY the raw query string. Do not output text like 'Here is the Scryfall search query'."
     )
     raw_query = await client.generate(query_prompt)
     search_query = raw_query.strip().replace("Query:", "").replace("`", "").strip()
+
+    print("\n\n" + search_query + "\n\n")
 
     # Fallback to general search if prompt is weird
     if "t:legendary" not in search_query:
