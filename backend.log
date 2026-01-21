@@ -1,0 +1,18 @@
+INFO:     Will watch for changes in these directories: ['/app/backend']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [10717] using StatReload
+INFO:     Started server process [10914]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+Ollama not reachable, switching to MOCK mode.
+INFO:     127.0.0.1:35516 - "POST /api/inventory/add?card_name=Flbthp_Nonexistent_Cousin HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:45252 - "POST /api/inventory/import?text=1%20Sol%20Ring%0A1%20FakeCardName123 HTTP/1.1" 207 Multi-Status
+INFO:     127.0.0.1:41890 - "GET /api/decks HTTP/1.1" 200 OK
+WARNING:  StatReload detected changes in 'agents.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [10914]
+INFO:     Started server process [12241]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
