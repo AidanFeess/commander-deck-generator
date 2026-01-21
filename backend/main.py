@@ -7,9 +7,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict
 
-from models import InventoryItem, CommanderRequest, CommanderResponse, DeckSettings, Deck, LogMessage, Card
+from models import InventoryItem, CommanderRequest, CommanderResponse, CommanderDetails, DeckSettings, Deck, LogMessage, Card
 from database import init_db, add_inventory_item, get_inventory, delete_inventory_item, create_deck, update_deck_status, get_deck, get_all_decks
-from mtg_api import get_card_data
+from mtg_api import get_card_data, search_scryfall
 from ollama_client import client
 from agents import DeckBuilder
 
@@ -99,17 +99,84 @@ def import_cards(text: str):
 # Deck Generation Endpoints
 @app.post("/api/generate/commander", response_model=CommanderResponse)
 async def generate_commander(request: CommanderRequest):
-    prompt = f"You are an advanced Magic: The Gathering commander deckbuilder. Suggest a Magic: The Gathering Commander based on this request: {request.prompt}. Valid commanders are Legendary Creatures or Planeswalkers with the text 'This can be a commander'. Return ONLY the name of the card in the first line, and a 1-2 sentence reasoning in the second line."
-    response_text = await client.generate(prompt)
+    # Step 1: Formulate a Search Query
+    query_prompt = (
+        f"The user wants a commander deck with this description: '{request.prompt}'.\n"
+        f"Create a Scryfall search query to find candidates. "
+        f"The query MUST include 't:legendary' and ('t:creature' or 'o:can be your commander'). "
+        f"Include color constraints if specified in the description (e.g. 'c>=br' or 'id:g'). "
+        f"Output ONLY the raw query string."
+    )
+    raw_query = await client.generate(query_prompt)
+    search_query = raw_query.strip().replace("Query:", "").replace("`", "").strip()
+
+    # Fallback to general search if prompt is weird
+    if "t:legendary" not in search_query:
+        search_query += " t:legendary (t:creature or o:\"can be your commander\")"
+
+    # Step 2: Search Scryfall
+    candidates = await asyncio.to_thread(search_scryfall, search_query, limit=10)
+
+    # If search fails, fallback to old method (direct prompt) or simple search
+    if not candidates:
+        fallback_query = "t:legendary (t:creature or o:\"can be your commander\")"
+        candidates = await asyncio.to_thread(search_scryfall, fallback_query, limit=10)
+
+    # Step 3: AI Selection
+    # Format candidates for the LLM
+    candidate_text = ""
+    for c in candidates:
+        candidate_text += f"- {c['name']} (ID: {c.get('color_identity')}, Type: {c['type_line']}): {c['oracle_text'][:100]}...\n"
+
+    selection_prompt = (
+        f"The user wants a deck described as: '{request.prompt}'.\n"
+        f"Here are valid commander candidates found via search:\n"
+        f"{candidate_text}\n"
+        f"Select the single best fit (or a legal partner pair from the list if applicable).\n"
+        f"Return the response in exactly two lines:\n"
+        f"Line 1: The name(s) of the chosen card(s) ONLY.\n"
+        f"Line 2: A 1-2 sentence reasoning."
+    )
+
+    response_text = await client.generate(selection_prompt)
     lines = response_text.strip().split('\n')
-    name = lines[0].replace("Commander:", "").strip()
+    name_line = lines[0].replace("Commander:", "").strip()
     reasoning = " ".join(lines[1:]).replace("Reasoning:", "").strip()
 
-    # Verify card exists (use async or thread pool for IO)
-    data = await asyncio.to_thread(get_card_data, name)
-    image_uri = data.get('image_uri') if data else None
+    # Step 4: Verification
+    commander_names = [n.strip() for n in name_line.split('+')]
+    commanders_details = []
+    primary_image = None
 
-    return CommanderResponse(name=name, reasoning=reasoning, image_uri=image_uri)
+    for c_name in commander_names:
+        # We can look up in our candidates list first to save a call, but get_card_data is cached/fast enough
+        data = await asyncio.to_thread(get_card_data, c_name)
+        if data:
+            # Re-verify validity (double check)
+            type_line = data.get('type_line', '').lower()
+            oracle_text = data.get('oracle_text', '').lower()
+            is_valid = ("legendary" in type_line and "creature" in type_line) or \
+                       ("planeswalker" in type_line and "can be your commander" in oracle_text)
+
+            img = data.get('image_uri')
+            commanders_details.append(CommanderDetails(name=data['name'], image_uri=img))
+            if not primary_image:
+                primary_image = img
+        else:
+             commanders_details.append(CommanderDetails(name=c_name, image_uri=None))
+
+    if not commanders_details:
+        # Total failure fallback
+        clean_name = "Unknown Commander"
+    else:
+        clean_name = " + ".join([c.name for c in commanders_details])
+
+    return CommanderResponse(
+        name=clean_name,
+        reasoning=reasoning,
+        image_uri=primary_image,
+        commanders=commanders_details
+    )
 
 async def run_deck_generation(deck_id: int, settings: DeckSettings):
     process_id = str(deck_id)
@@ -122,7 +189,6 @@ async def run_deck_generation(deck_id: int, settings: DeckSettings):
             timestamp=time.time()
         )
         await manager.broadcast(log_msg, process_id)
-        # Store log in DB? (Simplified: Not storing logs in DB for now, just streaming)
 
     builder = DeckBuilder(settings, log_callback)
 
@@ -136,12 +202,7 @@ async def run_deck_generation(deck_id: int, settings: DeckSettings):
 
 @app.post("/api/generate/deck")
 def start_deck_generation(settings: DeckSettings, background_tasks: BackgroundTasks):
-    # Create initial deck entry (or entries based on num_decks)
-    # The UI only tracks one ID, so we return the first one.
-    # Future improvements: return list of IDs or handle batch generation UI.
-
     primary_deck_id = None
-
     count = max(1, min(4, settings.num_decks))
 
     for i in range(count):
@@ -150,7 +211,6 @@ def start_deck_generation(settings: DeckSettings, background_tasks: BackgroundTa
         if i == 0:
             primary_deck_id = deck_id
 
-        # Start generation for each deck
         background_tasks.add_task(run_deck_generation, deck_id, settings)
 
     return {"deck_id": primary_deck_id}
@@ -171,13 +231,6 @@ async def websocket_endpoint(websocket: WebSocket, process_id: str):
     await manager.connect(websocket, process_id)
     try:
         while True:
-            await websocket.receive_text() # Keep connection open
+            await websocket.receive_text()
     except Exception:
         manager.disconnect(websocket, process_id)
-
-# Serve Frontend (Build output or Static)
-# For this dev setup, we will just mount the frontend folder if we built it.
-# But since we are using Vite in dev mode for logs, we might just proxy or let user run vite.
-# However, for a "Sleek Web App" deliverable, I should probably build the frontend.
-
-# For now, I won't mount static files yet until I build the frontend.
