@@ -17,29 +17,51 @@ class Agent:
         self.name = name
         self.personality = personality
 
-    async def analyze_candidates(self, candidates: List[Dict], strategy: str, log_callback: Callable) -> List[str]:
+    async def analyze_candidates(self, candidates: List[Dict], strategy: str, log_callback: Callable, previous_feedback: str = "") -> Dict[str, str]:
         """
         Analyze a batch of cards and vote on them.
-        Returns a list of card names that this agent approves.
+        Returns a dict: {"reasoning": str, "approved": List[str]}
         """
         # Simplify candidate data for the LLM to save context
         simplified_candidates = []
         for c in candidates:
             simplified_candidates.append(f"{c['name']} ({c['type_line']}): {c['oracle_text'][:150]}")
 
+        context_msg = ""
+        if previous_feedback:
+            context_msg = f"\nA previous agent said this about these cards: '{previous_feedback}'. Do you agree or disagree? Explain why, and make your own selections."
+
         prompt = (
             f"You are a Magic: The Gathering deck builder with a {self.personality} personality.\n"
             f"Strategy: {strategy}\n"
             f"Analyze these cards and pick the ones that fit the deck:\n"
             f"{' | '.join(simplified_candidates)}\n"
-            f"Return ONLY the names of the cards you approve, separated by commas. If none, return 'None'."
+            f"{context_msg}\n"
+            f"Return your response in JSON format: {{ \"reasoning\": \"...\", \"approved\": [\"Card Name 1\", \"Card Name 2\"] }}."
         )
 
         response = await client.generate(prompt)
-        await log_callback(self.name, f"Analyzed batch. Approved: {response}")
 
-        approved = [name.strip() for name in response.split(',') if name.strip() and name.lower() != 'none']
-        return approved
+        # Parse JSON from response
+        import json
+        import re
+        try:
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                reasoning = data.get("reasoning", "No reasoning provided.")
+                approved = data.get("approved", [])
+            else:
+                # Fallback
+                reasoning = response
+                approved = []
+        except:
+            reasoning = response
+            approved = []
+
+        await log_callback(self.name, f"{reasoning} (Approved: {len(approved)})")
+
+        return {"reasoning": reasoning, "approved": approved}
 
 class DeckBuilder:
     def __init__(self, settings, log_callback: Callable):
@@ -82,8 +104,8 @@ class DeckBuilder:
 
         # Ask LLM for search terms based on commander text
         synergy_prompt = (
-            f"Analyze the commander '{commander}'. Extract 3-5 distinct Scryfall search queries to find synergistic cards. "
-            f"Example: 'o:+1/+1 counters', 't:elf', 'o:proliferate'. "
+            f"Analyze the commander '{commander}'. Extract 5-8 distinct Scryfall search queries to find synergistic cards. "
+            f"Include a mix of specific mechanics (e.g. 'o:proliferate'), tribal tags (e.g. 't:elf'), and generic staples for these colors. "
             f"Return ONLY the queries separated by commas."
         )
         search_terms_text = await client.generate(synergy_prompt)
@@ -92,21 +114,33 @@ class DeckBuilder:
         candidate_pool: List[Dict] = []
         seen_candidates = set()
 
+        # Color Identity String
+        color_str = "".join(self.commander_colors).lower()
+        if not color_str: color_str = "c"
+
         # Execute searches
         for term in search_terms:
             # Construct strict query: term + commander colors + strict exclusion of illegal colors
             # Scryfall 'id' (color identity) syntax: id:g (mono green), id:gw (selesnya)
-            # If commander colors is empty, id:c
-            color_str = "".join(self.commander_colors).lower()
-            if not color_str: color_str = "c"
-
             query = f"({term}) id:<={color_str} (game:paper) -t:basic"
             await self.log_callback("System", f"Searching Scryfall: {query}")
 
-            results = await asyncio.to_thread(search_scryfall, query, limit=15)
+            results = await asyncio.to_thread(search_scryfall, query, limit=50)
             for card in results:
                 if card['name'] not in seen_candidates and card['name'] not in self.commander_names:
                     # Double check color identity locally just in case
+                    if self.is_color_compatible(card.get('color_identity', [])):
+                         candidate_pool.append(card)
+                         seen_candidates.add(card['name'])
+
+        # Fallback: Broad Search if pool is too small
+        if len(candidate_pool) < 100:
+            await self.log_callback("System", "Candidate pool low, performing broad search...")
+            broad_query = f"id:<={color_str} (game:paper) -t:basic"
+            # Maybe add "cheapest" or "edhrec rank" implicitly by Scryfall default sort or explicitly
+            broad_results = await asyncio.to_thread(search_scryfall, broad_query, limit=100)
+            for card in broad_results:
+                 if card['name'] not in seen_candidates and card['name'] not in self.commander_names:
                     if self.is_color_compatible(card.get('color_identity', [])):
                          candidate_pool.append(card)
                          seen_candidates.add(card['name'])
@@ -132,25 +166,44 @@ class DeckBuilder:
         await self.log_callback("System", "Phase 2: Analysis & Voting...")
 
         target_non_land = 63 # Aiming for ~36-37 lands
-        batch_size = 5
+        batch_size = 6 # Increase batch size slightly
 
         # Shuffle pool to vary results
         random.shuffle(candidate_pool)
 
+        # Collaborative Loop
         for i in range(0, len(candidate_pool), batch_size):
             if len(verified_cards) >= target_non_land:
                 break
 
             batch = candidate_pool[i : i+batch_size]
 
-            # Simple voting: If at least one agent likes it, we add it.
-            # (Strict majority can be too slow for small agent counts, but let's try strict > 0)
+            # Select Primary Agent and Reviewer Agent
+            primary_idx = i % len(self.agents)
+            reviewer_idx = (i + 1) % len(self.agents)
 
-            # We can ask one agent to pick from the batch to save tokens, or all.
-            # Let's have agents rotate.
-            agent = self.agents[i % len(self.agents)]
+            agent_primary = self.agents[primary_idx]
+            agent_reviewer = self.agents[reviewer_idx]
 
-            approved_names = await agent.analyze_candidates(batch, f"Build for {commander}", self.log_callback)
+            # Step 1: Primary Agent Proposes
+            result_primary = await agent_primary.analyze_candidates(
+                batch,
+                f"Build for {commander}",
+                self.log_callback
+            )
+
+            # Step 2: Reviewer Agent Critiques/Finalizes
+            # We pass the primary agent's reasoning as context
+            prev_feedback = f"{agent_primary.name} ({agent_primary.personality}): {result_primary['reasoning']} (Approved: {', '.join(result_primary['approved'])})"
+
+            result_final = await agent_reviewer.analyze_candidates(
+                batch,
+                f"Build for {commander}",
+                self.log_callback,
+                previous_feedback=prev_feedback
+            )
+
+            approved_names = result_final['approved']
 
             for card in batch:
                 # Fuzzy matching approved name
