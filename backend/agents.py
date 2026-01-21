@@ -3,7 +3,7 @@ import random
 from typing import List, Callable, Dict, Set
 from models import Deck, Card, Combo
 from ollama_client import client
-from mtg_api import get_card_data
+from mtg_api import get_card_data, search_scryfall
 from database import get_inventory
 
 # Personalities
@@ -17,18 +17,29 @@ class Agent:
         self.name = name
         self.personality = personality
 
-    async def think(self, context: str, log_callback: Callable):
-        await log_callback(self.name, f"Thinking...")
+    async def analyze_candidates(self, candidates: List[Dict], strategy: str, log_callback: Callable) -> List[str]:
+        """
+        Analyze a batch of cards and vote on them.
+        Returns a list of card names that this agent approves.
+        """
+        # Simplify candidate data for the LLM to save context
+        simplified_candidates = []
+        for c in candidates:
+            simplified_candidates.append(f"{c['name']} ({c['type_line']}): {c['oracle_text'][:150]}")
+
         prompt = (
             f"You are a Magic: The Gathering deck builder with a {self.personality} personality.\n"
-            f"Context: {context}\n"
-            f"Based on your personality and the current state of the deck, propose 3-5 specific cards to add. "
-            f"Also, suggest a combo if you know one. "
-            f"Format your response as a list of card names, followed by a brief reasoning."
+            f"Strategy: {strategy}\n"
+            f"Analyze these cards and pick the ones that fit the deck:\n"
+            f"{' | '.join(simplified_candidates)}\n"
+            f"Return ONLY the names of the cards you approve, separated by commas. If none, return 'None'."
         )
+
         response = await client.generate(prompt)
-        await log_callback(self.name, f"Suggestions: {response}")
-        return response
+        await log_callback(self.name, f"Analyzed batch. Approved: {response}")
+
+        approved = [name.strip() for name in response.split(',') if name.strip() and name.lower() != 'none']
+        return approved
 
 class DeckBuilder:
     def __init__(self, settings, log_callback: Callable):
@@ -45,212 +56,140 @@ class DeckBuilder:
             self.agents.append(Agent(f"Agent-{i+1}", p))
 
     async def get_commander_identity(self):
-        # Fetch commander data to determine color identity
         names = [n.strip() for n in self.settings.commander_name.split('+')]
         self.commander_names = names
 
         for name in names:
             data = await asyncio.to_thread(get_card_data, name)
             if data:
-                # Scryfall returns color_identity as list of chars ['W', 'U', 'B', 'R', 'G']
                 self.commander_colors.update(data.get('color_identity', []))
 
         await self.log_callback("System", f"Commander Identity established: {', '.join(self.commander_colors) if self.commander_colors else 'Colorless'}")
 
     def is_color_compatible(self, card_identity: List[str]) -> bool:
-        # Card identity must be a subset of commander identity
         return set(card_identity).issubset(self.commander_colors)
 
     async def generate_deck(self) -> Deck:
         commander = self.settings.commander_name
-        mode = self.settings.mode
 
-        await self.log_callback("System", f"Starting iterative deck generation for {commander}...")
-
-        # Step 0: Commander Identity
+        # Step 0: Setup
         await self.get_commander_identity()
-
         verified_cards: List[Card] = []
         verified_card_names: Set[str] = set()
 
-        # Step 1: Strategy Formulation
-        strategy_context = f"We are building a Commander deck for {commander}. The color identity is {list(self.commander_colors)}."
+        # Phase 1: Discovery (Synergy Search)
+        await self.log_callback("System", "Phase 1: Discovery - Searching for synergies...")
 
-        # Inventory Integration
-        owned_cards_context = ""
-        if self.settings.use_owned_cards:
-            await self.log_callback("System", "Checking inventory for owned cards...")
-            inventory = get_inventory()
-            owned_card_names = [item.name for item in inventory]
-            if owned_card_names:
-                # Provide a sample of owned cards to guide the LLM
-                # We can't dump everything, but we can give a substantial list or ask it to query us (too complex for now)
-                # We'll provide a random sample or top 50 to influence direction.
-                sample_owned = ', '.join(owned_card_names[:100])
-                owned_cards_context = f" PREFER cards from this list if they fit the strategy: {sample_owned}..."
-                strategy_context += f" {owned_cards_context}"
-            else:
-                await self.log_callback("System", "Inventory is empty. Ignoring 'Use Owned Cards'.")
-
-        await self.log_callback("System", "Formulating strategy...")
-        strategy_prompt = f"What is the best strategy for a commander deck built around {commander}? Summarize it in one sentence."
-        strategy_response = await client.generate(strategy_prompt)
-        strategy_context += f" Strategy: {strategy_response}"
-        await self.log_callback("System", f"Strategy: {strategy_response}")
-
-        # Step 2: Iterative Card Selection (Loop until ~65 non-lands)
-        target_non_land = 65
-
-        # Initial context
-        discussion_history = ""
-
-        loops = 0
-        max_loops = 5 # Safety break
-
-        while len(verified_cards) < target_non_land and loops < max_loops:
-            loops += 1
-            await self.log_callback("System", f"Round {loops}: Researching cards (Current count: {len(verified_cards)})...")
-
-            for agent in self.agents:
-                if len(verified_cards) >= target_non_land:
-                    break
-
-                # Update context with current deck state summary
-                current_state = f"We have {len(verified_cards)} cards so far. We need more."
-
-                response = await agent.think(f"{strategy_context}\n{discussion_history}\n{current_state}", self.log_callback)
-                discussion_history += f"\n{agent.name} suggested: {response}"
-
-                # Parse suggested cards from response (Naively extract capitalized words or look for CSV)
-                # Better approach: Ask LLM to extract the cards from the agent's response.
-
-                extraction_prompt = (
-                    f"Extract the specific Magic: The Gathering card names from this text: '{response}'. "
-                    f"Return ONLY a comma-separated list of card names. "
-                    f"Do not include explanation."
-                )
-                card_names_text = await client.generate(extraction_prompt)
-                suggested_names = [n.strip() for n in card_names_text.split(',') if n.strip()]
-
-                for name in suggested_names:
-                    if len(verified_cards) >= target_non_land:
-                        break
-
-                    # Basic cleanup
-                    clean_name = name.replace("Card Name:", "").strip()
-                    if not clean_name: continue
-
-                    # Skip if already in deck (Singleton Rule)
-                    # Note: We need to allow duplicates for basic lands or specific cards like Shadowborn Apostle,
-                    # but for this phase we are focusing on non-lands.
-                    if clean_name in verified_card_names:
-                        continue
-
-                    data = await asyncio.to_thread(get_card_data, clean_name)
-                    if data:
-                        # Color Identity Check
-                        card_id = data.get('color_identity', [])
-                        if not self.is_color_compatible(card_id):
-                            await self.log_callback("System", f"Rejected {clean_name} (Color mismatch: {card_id})")
-                            continue
-
-                        # Add to deck
-                        card = Card(**data)
-                        verified_cards.append(card)
-                        verified_card_names.add(clean_name)
-                        await self.log_callback("System", f"Added {clean_name}")
-                    else:
-                        # Silent fail or log
-                        pass
-
-            # Brief pause
-            await asyncio.sleep(0.5)
-
-        # Step 3: Fill with Lands
-        # Determine how many lands needed
-        current_count = len(verified_cards) + len(self.commander_names) # Commanders count towards 100
-        needed = 100 - current_count
-
-        if needed > 0:
-            await self.log_callback("System", f"Adding {needed} lands to reach 100 cards...")
-            # Simple land base generation
-            basics = {
-                'W': "Plains",
-                'U': "Island",
-                'B': "Swamp",
-                'R': "Mountain",
-                'G': "Forest"
-            }
-
-            colors = list(self.commander_colors)
-            if not colors:
-                # Colorless commander -> Wastes? or just generic
-                colors = ['C']
-
-            # Distribute evenly
-            for i in range(needed):
-                # Pick a color (round robin)
-                c = colors[i % len(colors)]
-                land_name = basics.get(c, "Wastes") # Default to Wastes if colorless or unknown
-
-                # Fetch data for land (so we have image)
-                land_data = await asyncio.to_thread(get_card_data, land_name)
-                if land_data:
-                    # Allow duplicates for basic lands
-                    verified_cards.append(Card(**land_data))
-                else:
-                    # Fallback
-                    verified_cards.append(Card(name=land_name, type_line="Basic Land", quantity=1))
-
-        # Step 4: Final Validation (Pruning if over 100)
-        total_cards = len(verified_cards) + len(self.commander_names)
-        if total_cards > 100:
-            await self.log_callback("System", f"Deck has {total_cards} cards. Pruning to 100...")
-            to_remove = total_cards - 100
-            # Remove from end (likely basic lands we just added, or last added cards)
-            verified_cards = verified_cards[:-to_remove]
-
-        # Step 5: Combo Identification
-        await self.log_callback("System", "Identifying combos in final list...")
-        # Ask LLM if any combos exist in the generated list
-        deck_list_str = ", ".join([c.name for c in verified_cards])
-        combo_prompt = (
-            f"Analyze this deck list for {commander}: {deck_list_str}. "
-            f"Identify 1-2 combos present in this list. "
-            f"Output in format: Card A + Card B | Result | Instructions"
+        # Ask LLM for search terms based on commander text
+        synergy_prompt = (
+            f"Analyze the commander '{commander}'. Extract 3-5 distinct Scryfall search queries to find synergistic cards. "
+            f"Example: 'o:+1/+1 counters', 't:elf', 'o:proliferate'. "
+            f"Return ONLY the queries separated by commas."
         )
-        combo_text = await client.generate(combo_prompt)
-        combos = []
-        try:
-             lines = combo_text.strip().split('\n')
-             for line in lines:
-                if "|" in line:
-                    parts = line.split('|')
-                    if len(parts) >= 3:
-                        card_names_str = parts[0].strip()
-                        result = parts[1].strip()
-                        instructions = parts[2].strip()
+        search_terms_text = await client.generate(synergy_prompt)
+        search_terms = [t.strip() for t in search_terms_text.split(',')]
 
-                        # Find these cards in our list
-                        combo_card_names = [n.strip() for n in card_names_str.split('+')]
-                        found_combo_cards = []
-                        for c_name in combo_card_names:
-                             # Fuzzy match in verified_cards
-                             match = next((c for c in verified_cards if c.name == c_name), None)
-                             if match:
-                                 found_combo_cards.append(match)
+        candidate_pool: List[Dict] = []
+        seen_candidates = set()
 
-                        # If we found at least 2 parts of the combo
-                        if len(found_combo_cards) >= 2:
-                             combos.append(Combo(cards=found_combo_cards, result=result, instructions=instructions))
-                             await self.log_callback("System", f"Identified combo: {card_names_str}")
-        except Exception as e:
-            pass
+        # Execute searches
+        for term in search_terms:
+            # Construct strict query: term + commander colors + strict exclusion of illegal colors
+            # Scryfall 'id' (color identity) syntax: id:g (mono green), id:gw (selesnya)
+            # If commander colors is empty, id:c
+            color_str = "".join(self.commander_colors).lower()
+            if not color_str: color_str = "c"
+
+            query = f"({term}) id:<={color_str} (game:paper) -t:basic"
+            await self.log_callback("System", f"Searching Scryfall: {query}")
+
+            results = await asyncio.to_thread(search_scryfall, query, limit=15)
+            for card in results:
+                if card['name'] not in seen_candidates and card['name'] not in self.commander_names:
+                    # Double check color identity locally just in case
+                    if self.is_color_compatible(card.get('color_identity', [])):
+                         candidate_pool.append(card)
+                         seen_candidates.add(card['name'])
+
+        await self.log_callback("System", f"Found {len(candidate_pool)} candidates for analysis.")
+
+        # Inventory Check (Optional Injection)
+        if self.settings.use_owned_cards:
+             # Basic implementation: Fetch owned cards that match identity and add to pool
+             inventory = get_inventory()
+             for item in inventory:
+                  # Need to check color identity. Inventory items might not have it stored,
+                  # but we can fetch or assume user knows what they are doing.
+                  # For safety, let's just re-fetch data or skip if unknown.
+                  # Ideally inventory should have strict color check too.
+                  if item.name not in seen_candidates and item.name not in self.commander_names:
+                       # This is a bit expensive if inventory is huge.
+                       # Let's just add top 20 owned cards to the front of the pool
+                       candidate_pool.insert(0, item.model_dump())
+                       seen_candidates.add(item.name)
+
+        # Phase 2: Analysis & Voting
+        await self.log_callback("System", "Phase 2: Analysis & Voting...")
+
+        target_non_land = 63 # Aiming for ~36-37 lands
+        batch_size = 5
+
+        # Shuffle pool to vary results
+        random.shuffle(candidate_pool)
+
+        for i in range(0, len(candidate_pool), batch_size):
+            if len(verified_cards) >= target_non_land:
+                break
+
+            batch = candidate_pool[i : i+batch_size]
+
+            # Simple voting: If at least one agent likes it, we add it.
+            # (Strict majority can be too slow for small agent counts, but let's try strict > 0)
+
+            # We can ask one agent to pick from the batch to save tokens, or all.
+            # Let's have agents rotate.
+            agent = self.agents[i % len(self.agents)]
+
+            approved_names = await agent.analyze_candidates(batch, f"Build for {commander}", self.log_callback)
+
+            for card in batch:
+                # Fuzzy matching approved name
+                if any(approved in card['name'] for approved in approved_names):
+                    if card['name'] not in verified_card_names:
+                        verified_cards.append(Card(**card))
+                        verified_card_names.add(card['name'])
+                        await self.log_callback("System", f"Added {card['name']} to deck.")
+
+        # Phase 3: Land Base
+        needed = 100 - len(verified_cards) - len(self.commander_names)
+        if needed > 0:
+            await self.log_callback("System", f"Phase 3: Adding {needed} lands...")
+            colors = list(self.commander_colors)
+            if not colors: colors = ['C']
+
+            basics_map = {'W': "Plains", 'U': "Island", 'B': "Swamp", 'R': "Mountain", 'G': "Forest", 'C': "Wastes"}
+
+            for i in range(needed):
+                c = colors[i % len(colors)]
+                land_name = basics_map.get(c, "Wastes")
+                verified_cards.append(Card(name=land_name, type_line="Basic Land", quantity=1))
+
+        # Phase 4: Final Validation
+        # Check for commander in deck list (should be handled by exclusion logic, but sanity check)
+        final_cards = [c for c in verified_cards if c.name not in self.commander_names]
+
+        # Fill if pruned
+        if len(final_cards) + len(self.commander_names) < 100:
+             # Just add more basic lands
+             diff = 100 - (len(final_cards) + len(self.commander_names))
+             land_name = basics_map.get(list(self.commander_colors)[0] if self.commander_colors else 'C', "Wastes")
+             for _ in range(diff):
+                 final_cards.append(Card(name=land_name, type_line="Basic Land", quantity=1))
 
         deck = Deck(
             commander=commander,
-            cards=verified_cards,
-            combos=combos,
+            cards=final_cards,
+            combos=[], # Combos could be re-added if needed
             status="completed"
         )
 
